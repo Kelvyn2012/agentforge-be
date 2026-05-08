@@ -9,7 +9,7 @@ from app.db.session import get_session
 from app.schemas.auth import MessageResponse
 from app.services.auth import get_user_by_email
 
-DBSession = Annotated[AsyncSession, Depends(get_session)]
+from app.api.deps import DBSession
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
