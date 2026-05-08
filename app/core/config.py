@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     DATABASE_URL: PostgresDsn
 
     # JWT
-    JWT_SECRET: str = "change-me-in-production"
+    JWT_SECRET: str
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_TTL_MINUTES: int = 60
     VERIFICATION_TOKEN_TTL_HOURS: int = 24
