@@ -8,6 +8,7 @@ from app.models.enums import UserPlan, UserProvider
 
 if TYPE_CHECKING:
     from app.models.agent import Agent
+    from app.models.refresh_token import RefreshToken
 
 
 class User(BaseModel):
@@ -49,6 +50,10 @@ class User(BaseModel):
 
     # relationships
     agents: Mapped[list["Agent"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    refresh_tokens: Mapped[list["RefreshToken"]] = relationship(  # ← new
         back_populates="user",
         cascade="all, delete-orphan",
     )
