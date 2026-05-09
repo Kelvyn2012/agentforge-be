@@ -21,11 +21,11 @@ def decode_token(token: str) -> dict[str, Any]:
     """Decode and validate a JWT. Raises HTTP 401 on any failure."""
     try:
         return jwt.decode(
-            token, 
-            settings.JWT_SECRET, 
-            algorithms=[settings.JWT_ALGORITHM], 
+            token,
+            settings.JWT_SECRET,
+            algorithms=[settings.JWT_ALGORITHM],
             leeway=30,
-            options={"require": ["exp"]}
+            options={"require": ["exp"]},
         )
     except jwt.ExpiredSignatureError as exc:
         raise HTTPException(
