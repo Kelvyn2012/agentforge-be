@@ -1,11 +1,11 @@
-from fastapi import APIRouter, HTTPException, Query, Request, status
+from fastapi import APIRouter, Cookie, HTTPException, Query, Request, Response, status
 
 from app.api.deps import CurrentUser, DBSession
+from app.core.config import settings
 from app.core.security import create_verification_token, decode_token
 from app.schemas.auth import (
     LoginRequest,
     MessageResponse,
-    RefreshTokenRequest,
     RegisterRequest,
     TokenResponse,
     UserResponse,
@@ -20,6 +20,31 @@ from app.services.auth import (
 from app.services.email import send_verification_email
 
 router = APIRouter()
+_REFRESH_TOKEN_COOKIE = "refresh_token"
+_REFRESH_TOKEN_COOKIE_PATH = f"{settings.API_V1_PREFIX}/auth"
+_REFRESH_TOKEN_COOKIE_MAX_AGE = settings.REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60
+
+
+def _set_refresh_token_cookie(response: Response, refresh_token: str) -> None:
+    response.set_cookie(
+        key=_REFRESH_TOKEN_COOKIE,
+        value=refresh_token,
+        max_age=_REFRESH_TOKEN_COOKIE_MAX_AGE,
+        path=_REFRESH_TOKEN_COOKIE_PATH,
+        secure=True,
+        httponly=True,
+        samesite="strict",
+    )
+
+
+def _clear_refresh_token_cookie(response: Response) -> None:
+    response.delete_cookie(
+        key=_REFRESH_TOKEN_COOKIE,
+        path=_REFRESH_TOKEN_COOKIE_PATH,
+        secure=True,
+        httponly=True,
+        samesite="strict",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -57,10 +82,12 @@ async def register(body: RegisterRequest, db: DBSession) -> MessageResponse:
 @router.post(
     "/login",
     response_model=TokenResponse,
-    summary="Log in and receive an access + refresh token",
+    response_model_exclude_none=True,
+    summary="Log in and receive an access token plus refresh cookie",
 )
 async def login(
     request: Request,
+    response: Response,
     body: LoginRequest,
     db: DBSession,
 ) -> TokenResponse:
@@ -70,7 +97,8 @@ async def login(
         password=body.password,
         request=request,
     )
-    return TokenResponse(access_token=access_token, refresh_token=raw_refresh)
+    _set_refresh_token_cookie(response, raw_refresh)
+    return TokenResponse(access_token=access_token)
 
 
 # ---------------------------------------------------------------------------
@@ -81,17 +109,25 @@ async def login(
 @router.post(
     "/refresh",
     response_model=TokenResponse,
-    summary="Exchange a refresh token for a new access token (token rotation)",
+    response_model_exclude_none=True,
+    summary="Rotate the refresh cookie and receive a new access token",
 )
 async def refresh(
     request: Request,
+    response: Response,
     db: DBSession,
-    payload: RefreshTokenRequest,
+    refresh_token: str | None = Cookie(default=None, alias=_REFRESH_TOKEN_COOKIE),
 ) -> TokenResponse:
+    if refresh_token is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="No refresh token provided",
+        )
     access_token, new_raw_refresh = await rotate_refresh_token(
-        db, payload.refresh_token, request
+        db, refresh_token, request
     )
-    return TokenResponse(access_token=access_token, refresh_token=new_raw_refresh)
+    _set_refresh_token_cookie(response, new_raw_refresh)
+    return TokenResponse(access_token=access_token)
 
 
 # ---------------------------------------------------------------------------
@@ -102,13 +138,16 @@ async def refresh(
 @router.post(
     "/logout",
     response_model=MessageResponse,
-    summary="Revoke a refresh token provided in the request body",
+    summary="Revoke the refresh token cookie",
 )
 async def logout(
+    response: Response,
     db: DBSession,
-    payload: RefreshTokenRequest,
+    refresh_token: str | None = Cookie(default=None, alias=_REFRESH_TOKEN_COOKIE),
 ) -> MessageResponse:
-    await logout_user(db, payload.refresh_token)
+    if refresh_token is not None:
+        await logout_user(db, refresh_token)
+    _clear_refresh_token_cookie(response)
     return MessageResponse(message="Logged out successfully")
 
 

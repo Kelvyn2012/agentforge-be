@@ -1,10 +1,12 @@
 import uuid
 from datetime import UTC, datetime
+from ipaddress import ip_address as parse_ip_address
 
 from fastapi import HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.security import (
     create_access_token,
     generate_refresh_token,
@@ -18,6 +20,7 @@ from app.models.refresh_token import RefreshToken
 from app.models.user import User
 
 _DUMMY_PASSWORD_HASH = hash_password("not-the-password")
+_MAX_USER_AGENT_LENGTH = 512
 
 
 async def get_user_by_email(db: AsyncSession, email: str) -> User | None:
@@ -196,12 +199,39 @@ async def _create_refresh_token(
 
 
 def _refresh_token_context(request: Request) -> tuple[str | None, str | None]:
+    client_host = _valid_ip_address(request.client.host if request.client else None)
     forwarded_for = request.headers.get("x-forwarded-for")
-    if forwarded_for:
-        ip_address = forwarded_for.split(",", 1)[0].strip() or None
-    elif request.client:
-        ip_address = request.client.host
-    else:
-        ip_address = None
 
-    return request.headers.get("user-agent"), ip_address
+    if forwarded_for and client_host in _trusted_proxies():
+        forwarded_ip = _valid_ip_address(forwarded_for.split(",", 1)[0].strip())
+        ip_address = forwarded_ip or client_host
+    else:
+        ip_address = client_host
+
+    return _bounded_header(request.headers.get("user-agent")), ip_address
+
+
+def _trusted_proxies() -> set[str]:
+    return {
+        proxy
+        for proxy in (
+            _valid_ip_address(value.strip())
+            for value in settings.TRUSTED_PROXIES.split(",")
+        )
+        if proxy is not None
+    }
+
+
+def _valid_ip_address(value: str | None) -> str | None:
+    if not value or len(value) > 45:
+        return None
+    try:
+        return str(parse_ip_address(value))
+    except ValueError:
+        return None
+
+
+def _bounded_header(value: str | None) -> str | None:
+    if not value:
+        return None
+    return value[:_MAX_USER_AGENT_LENGTH]
