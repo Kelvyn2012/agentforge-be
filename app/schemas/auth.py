@@ -12,7 +12,7 @@ class MessageResponse(BaseModel):
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
-    refresh_token: str | None
+    refresh_token: str | None = None
 
 
 class RegisterRequest(BaseModel):
@@ -27,7 +27,7 @@ class LoginRequest(BaseModel):
 
 
 class RefreshTokenRequest(BaseModel):
-    refresh_token: str
+    refresh_token: str = Field(min_length=1)
 
 
 class UserResponse(BaseModel):

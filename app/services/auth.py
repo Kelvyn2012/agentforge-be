@@ -17,6 +17,8 @@ from app.models.enums import UserProvider
 from app.models.refresh_token import RefreshToken
 from app.models.user import User
 
+_DUMMY_PASSWORD_HASH = hash_password("not-the-password")
+
 
 async def get_user_by_email(db: AsyncSession, email: str) -> User | None:
     result = await db.execute(select(User).where(User.email == email))
@@ -51,7 +53,6 @@ async def register_user(
         email_verified=False,
     )
     db.add(user)
-    await db.flush()
     await db.commit()
     await db.refresh(user)
     return user
@@ -61,13 +62,19 @@ async def login_user(
     db: AsyncSession,
     email: str,
     password: str,
+    request: Request,
 ) -> tuple[str, str]:
     user = await get_user_by_email(db, email.lower())
 
-    dummy_hash = "$2b$12$KIXCfJMCfucPqmBxmzmpFuGHGSsXgEJ9Eq/ztV9bPYhZDi7p3eDMq"
-    stored_hash = user.password_hash if user else dummy_hash
+    stored_hash = (
+        user.password_hash if user and user.password_hash else _DUMMY_PASSWORD_HASH
+    )
 
-    if not verify_password(password, stored_hash) or user is None:  # pyright: ignore[reportArgumentType]
+    if (
+        not verify_password(password, stored_hash)
+        or user is None
+        or not user.password_hash
+    ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
@@ -86,7 +93,13 @@ async def login_user(
         )
 
     access_token = create_access_token(str(user.id))
-    raw_refresh, _ = await _create_refresh_token(db, user)
+    user_agent, ip_address = _refresh_token_context(request)
+    raw_refresh, _ = await _create_refresh_token(
+        db,
+        user,
+        user_agent=user_agent,
+        ip_address=ip_address,
+    )
     await db.commit()
 
     return access_token, raw_refresh
@@ -121,14 +134,19 @@ async def rotate_refresh_token(
 
     user = await get_user_by_id(db, record.user_id)  # type: ignore[union-attr]
     if user is None or not user.is_active:
-        await db.commit()
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found or inactive",
         )
 
     access_token = create_access_token(str(user.id))
-    raw_refresh, _ = await _create_refresh_token(db, user)
+    user_agent, ip_address = _refresh_token_context(request)
+    raw_refresh, _ = await _create_refresh_token(
+        db,
+        user,
+        user_agent=user_agent,
+        ip_address=ip_address,
+    )
     await db.commit()
 
     return access_token, raw_refresh
@@ -145,7 +163,13 @@ def _validate_refresh_record(record: RefreshToken | None) -> None:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Refresh token has been revoked",
         )
-    if record.expires_at.replace(tzinfo=UTC) < datetime.now(UTC):
+    expires_at = record.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    else:
+        expires_at = expires_at.astimezone(UTC)
+
+    if expires_at < datetime.now(UTC):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Refresh token has expired",
@@ -153,13 +177,31 @@ def _validate_refresh_record(record: RefreshToken | None) -> None:
 
 
 async def _create_refresh_token(
-    db: AsyncSession, user: User
+    db: AsyncSession,
+    user: User,
+    *,
+    user_agent: str | None,
+    ip_address: str | None,
 ) -> tuple[str, RefreshToken]:
     raw = generate_refresh_token()
     record = RefreshToken(
         token_hash=hash_refresh_token(raw),
-        user_id=str(user.id),
+        user_id=user.id,
         expires_at=refresh_token_expiry(),
+        user_agent=user_agent,
+        ip_address=ip_address,
     )
     db.add(record)
     return raw, record
+
+
+def _refresh_token_context(request: Request) -> tuple[str | None, str | None]:
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        ip_address = forwarded_for.split(",", 1)[0].strip() or None
+    elif request.client:
+        ip_address = request.client.host
+    else:
+        ip_address = None
+
+    return request.headers.get("user-agent"), ip_address

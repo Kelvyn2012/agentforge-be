@@ -1,5 +1,3 @@
-import logging
-
 from fastapi import APIRouter, HTTPException, Query, Request, status
 
 from app.api.deps import CurrentUser, DBSession
@@ -19,9 +17,9 @@ from app.services.auth import (
     register_user,
     rotate_refresh_token,
 )
+from app.services.email import send_verification_email
 
 router = APIRouter()
-logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -44,12 +42,7 @@ async def register(body: RegisterRequest, db: DBSession) -> MessageResponse:
     )
 
     verification_token = create_verification_token(user.email)
-    logger.info(
-        "Verification token for %s: %s",
-        user.email,
-        verification_token,
-    )
-    print(verification_token)
+    send_verification_email(user.email, verification_token)
 
     return MessageResponse(
         message="Account created. Check your email to verify your address."
@@ -67,6 +60,7 @@ async def register(body: RegisterRequest, db: DBSession) -> MessageResponse:
     summary="Log in and receive an access + refresh token",
 )
 async def login(
+    request: Request,
     body: LoginRequest,
     db: DBSession,
 ) -> TokenResponse:
@@ -74,6 +68,7 @@ async def login(
         db,
         email=body.email,
         password=body.password,
+        request=request,
     )
     return TokenResponse(access_token=access_token, refresh_token=raw_refresh)
 
@@ -93,14 +88,8 @@ async def refresh(
     db: DBSession,
     payload: RefreshTokenRequest,
 ) -> TokenResponse:
-    refresh_token = payload.refresh_token
-    if not refresh_token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="No refresh token provided",
-        )
     access_token, new_raw_refresh = await rotate_refresh_token(
-        db, refresh_token, request
+        db, payload.refresh_token, request
     )
     return TokenResponse(access_token=access_token, refresh_token=new_raw_refresh)
 
@@ -113,16 +102,13 @@ async def refresh(
 @router.post(
     "/logout",
     response_model=MessageResponse,
-    summary="Revoke the current refresh token and clear the cookie",
+    summary="Revoke a refresh token provided in the request body",
 )
 async def logout(
     db: DBSession,
-    _: CurrentUser,
     payload: RefreshTokenRequest,
 ) -> MessageResponse:
-    refresh_token = payload.refresh_token
-    if refresh_token:
-        await logout_user(db, refresh_token)
+    await logout_user(db, payload.refresh_token)
     return MessageResponse(message="Logged out successfully")
 
 

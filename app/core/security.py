@@ -6,6 +6,7 @@ from typing import Any
 import jwt
 from fastapi import HTTPException, status
 from pwdlib import PasswordHash
+from pwdlib.exceptions import UnknownHashError
 
 from app.core.config import settings
 
@@ -20,8 +21,11 @@ def hash_password(password: str) -> str:
     return pwd_hash.hash(password)
 
 
-def verify_password(password: str, hash: str) -> bool:
-    return pwd_hash.verify(password, hash)
+def verify_password(password: str, password_hash: str) -> bool:
+    try:
+        return pwd_hash.verify(password, password_hash)
+    except UnknownHashError:
+        return False
 
 
 def generate_refresh_token() -> str:
