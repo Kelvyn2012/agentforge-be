@@ -20,7 +20,13 @@ def create_token(payload: dict[str, Any], expires: timedelta) -> str:
 def decode_token(token: str) -> dict[str, Any]:
     """Decode and validate a JWT. Raises HTTP 401 on any failure."""
     try:
-        return jwt.decode(token, _SECRET, algorithms=[_ALGORITHM])
+        return jwt.decode(
+            token, 
+            settings.JWT_SECRET, 
+            algorithms=[settings.JWT_ALGORITHM], 
+            leeway=30,
+            options={"require": ["exp"]}
+        )
     except jwt.ExpiredSignatureError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
