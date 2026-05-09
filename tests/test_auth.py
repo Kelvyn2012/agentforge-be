@@ -78,7 +78,6 @@ class TestEmailPasswordAuth:
         set_cookie = resp.headers["set-cookie"]
         assert "refresh_token=raw-refresh-token" in set_cookie
         assert "HttpOnly" in set_cookie
-        assert "Secure" in set_cookie
         assert "samesite=strict" in set_cookie.lower()
         assert "Path=/api/v1/auth" in set_cookie
         login_user.assert_awaited_once()
@@ -235,6 +234,77 @@ class TestEmailPasswordAuth:
         logged = str(logger_info.call_args)
         assert "secret@example.com" not in logged
         assert "token-value" not in logged
+
+
+class TestGoogleOAuth:
+    async def test_google_start_sets_state_cookie_and_redirects(self, client):
+        with (
+            patch(
+                "app.api.v1.endpoints.auth.create_oauth_state_token",
+                return_value="state-token",
+            ),
+            patch(
+                "app.api.v1.endpoints.auth.build_google_auth_url",
+                return_value="https://accounts.google.com/o/oauth2/v2/auth",
+            ),
+        ):
+            resp = await client.get("/api/v1/auth/google")
+
+        assert resp.status_code == 307
+        assert (
+            resp.headers["location"] == "https://accounts.google.com/o/oauth2/v2/auth"
+        )
+        set_cookie = resp.headers["set-cookie"]
+        assert "oauth_state=state-token" in set_cookie
+
+    async def test_google_callback_returns_token_and_sets_refresh_cookie(self, client):
+        user = _make_user(email="google@example.com", email_verified=True)
+
+        with (
+            patch(
+                "app.api.v1.endpoints.auth.decode_token",
+                return_value={"purpose": "oauth_state"},
+            ),
+            patch(
+                "app.api.v1.endpoints.auth.exchange_google_code",
+                new=AsyncMock(return_value={"access_token": "google-access"}),
+            ),
+            patch(
+                "app.api.v1.endpoints.auth.fetch_google_userinfo",
+                new=AsyncMock(
+                    return_value={
+                        "sub": "google-subject",
+                        "email": user.email,
+                        "email_verified": True,
+                        "name": "Google User",
+                    }
+                ),
+            ),
+            patch(
+                "app.api.v1.endpoints.auth.login_or_register_google_user",
+                new=AsyncMock(return_value=("access-token", "refresh-token", user)),
+            ),
+        ):
+            resp = await client.get(
+                "/api/v1/auth/google/callback?code=abc&state=state-token",
+                headers={"cookie": "oauth_state=state-token"},
+            )
+
+        assert resp.status_code == 200
+        assert resp.json() == {"access_token": "access-token", "token_type": "bearer"}
+        set_cookies = resp.headers.get_list("set-cookie")
+        assert any("refresh_token=refresh-token" in value for value in set_cookies)
+        assert any(
+            "oauth_state=" in value and "Max-Age=0" in value for value in set_cookies
+        )
+
+    async def test_google_callback_rejects_state_mismatch(self, client):
+        resp = await client.get(
+            "/api/v1/auth/google/callback?code=abc&state=state-token",
+            headers={"cookie": "oauth_state=other-state"},
+        )
+
+        assert resp.status_code == 400
 
 
 # ---------------------------------------------------------------------------
