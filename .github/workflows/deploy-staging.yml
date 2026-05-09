@@ -1,0 +1,50 @@
+name: Deploy Staging
+
+on:
+  push:
+    branches: [staging]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    environment:
+      name: "staging"
+      url: "https://api.staging.agent-forge"
+
+    steps:
+    - name: Deploy to staging server
+      uses: appleboy/ssh-action@v1.2.1
+      with:
+        host: ${{ secrets.HOST }}
+        username: ${{ secrets.USERNAME }}
+        password: ${{ secrets.PASSWORD }}
+        script_stop: true
+        script: |
+          set -e
+
+          echo "=== Deploying Backend Staging ==="
+
+          # Navigate to staging directory
+          cd ~/agentforge/backend/staging
+
+          # Pull latest code
+          git fetch origin staging
+          git reset --hard origin/staging
+
+          # Write .env file
+          echo "${{ secrets.ENV_BASE64 }}" | base64 -d > .env
+
+          # Install dependencies
+          uv sync
+
+          # Run database migrations (MUST succeed before proceeding)
+          echo "=== Running Alembic Migrations ==="
+          uv run alembic upgrade head
+
+          # Restart the application
+          echo "=== Restarting PM2 Process ==="
+          pm2 restart backend-staging --update-env
+
+          echo "=== Staging Deployment Complete ==="
