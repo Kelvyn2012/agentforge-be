@@ -1,0 +1,50 @@
+name: Deploy Production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    environment:
+      name: "production"
+      url: "https://api.agent-forge"
+
+    steps:
+      - name: Deploy to production server
+        uses: appleboy/ssh-action@v1.2.1
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          password: ${{ secrets.PASSWORD }}
+          script_stop: true
+          script: |
+            set -e
+
+            echo "=== Deploying Backend Production ==="
+
+            # Navigate to production directory
+            cd ~/agentforge/backend/production
+
+            # Pull latest code
+            git fetch origin main
+            git reset --hard origin/main
+
+            # Write .env file
+            echo "${{ secrets.ENV_BASE64 }}" | base64 -d > .env
+
+            # Install dependencies
+            uv sync
+
+            # Run database migrations (MUST succeed before proceeding)
+            echo "=== Running Alembic Migrations ==="
+            uv run alembic upgrade head
+
+            # Restart the application
+            echo "=== Restarting PM2 Process ==="
+            pm2 restart backend-production --update-env
+
+            echo "=== Production Deployment Complete ==="
