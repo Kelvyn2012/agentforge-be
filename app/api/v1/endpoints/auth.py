@@ -1,15 +1,11 @@
 import logging
-from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.core.security import decode_token
-from app.db.session import get_session
-from app.schemas.auth import MessageResponse
-from app.services.auth import get_user_by_email
+from fastapi import APIRouter, HTTPException, Query, status
 
 from app.api.deps import DBSession
+from app.core.security import decode_token
+from app.schemas.auth import MessageResponse
+from app.services.auth import get_user_by_email
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
