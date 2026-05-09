@@ -1,13 +1,44 @@
+import hashlib
+import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import jwt
 from fastapi import HTTPException, status
+from pwdlib import PasswordHash
+from pwdlib.exceptions import UnknownHashError
 
 from app.core.config import settings
 
+pwd_hash = PasswordHash.recommended()
+
 _ALGORITHM = settings.JWT_ALGORITHM
 _SECRET = settings.JWT_SECRET
+_REFRESH_TOKEN_BYTES = 64
+
+
+def hash_password(password: str) -> str:
+    return pwd_hash.hash(password)
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    try:
+        return pwd_hash.verify(password, password_hash)
+    except UnknownHashError:
+        return False
+
+
+def generate_refresh_token() -> str:
+    """Return a URL-safe random string suitable for use as a refresh token."""
+    return secrets.token_urlsafe(_REFRESH_TOKEN_BYTES)
+
+
+def hash_refresh_token(raw: str) -> str:
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def refresh_token_expiry() -> datetime:
+    return datetime.now(UTC) + timedelta(days=settings.REFRESH_TOKEN_TTL_DAYS)
 
 
 def create_token(payload: dict[str, Any], expires: timedelta) -> str:

@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_TTL_MINUTES: int = 60
     VERIFICATION_TOKEN_TTL_HOURS: int = 24
+    REFRESH_TOKEN_TTL_DAYS: int = 7
+    TRUSTED_PROXIES: str = ""
 
     # Frontend (used in email links)
     FRONTEND_URL: str = "http://localhost:3000"

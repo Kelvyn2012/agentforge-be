@@ -5,17 +5,23 @@ Tests for:
 
 import uuid
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import jwt
+import pytest
+from fastapi import HTTPException
 
 from app.core.config import settings
 from app.core.security import (
     create_access_token,
     create_verification_token,
+    hash_refresh_token,
 )
 from app.models.enums import UserProvider
 from app.models.user import User
+from app.schemas.auth import TokenResponse
+from app.services import auth as auth_service
+from app.services import email as email_service
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -39,6 +45,196 @@ def _make_user(
         is_active=True,
     )
     return user
+
+
+def _make_request(headers: dict[str, str] | None = None, host: str | None = "test"):
+    request = MagicMock()
+    request.headers = headers or {}
+    request.client = MagicMock(host=host) if host else None
+    return request
+
+
+# ---------------------------------------------------------------------------
+# Email/password auth
+# ---------------------------------------------------------------------------
+
+
+class TestEmailPasswordAuth:
+    async def test_login_sets_refresh_cookie_without_returning_it(self, client):
+        with patch(
+            "app.api.v1.endpoints.auth.login_user",
+            new=AsyncMock(return_value=("access-token", "raw-refresh-token")),
+        ) as login_user:
+            resp = await client.post(
+                "/api/v1/auth/login",
+                json={"email": "new@example.com", "password": "correct-password"},
+            )
+
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "access_token": "access-token",
+            "token_type": "bearer",
+        }
+        set_cookie = resp.headers["set-cookie"]
+        assert "refresh_token=raw-refresh-token" in set_cookie
+        assert "HttpOnly" in set_cookie
+        assert "Secure" in set_cookie
+        assert "samesite=strict" in set_cookie.lower()
+        assert "Path=/api/v1/auth" in set_cookie
+        login_user.assert_awaited_once()
+
+    async def test_register_sends_verification_without_printing_token(self, client):
+        user = _make_user(email="new@example.com")
+
+        with (
+            patch(
+                "app.api.v1.endpoints.auth.register_user",
+                new=AsyncMock(return_value=user),
+            ) as register_user,
+            patch("app.api.v1.endpoints.auth.send_verification_email") as send_email,
+            patch("builtins.print") as print_mock,
+        ):
+            resp = await client.post(
+                "/api/v1/auth/register",
+                json={
+                    "email": user.email,
+                    "password": "correct horse battery staple",
+                    "display_name": "New User",
+                },
+            )
+
+        assert resp.status_code == 201
+        register_user.assert_awaited_once()
+        send_email.assert_called_once()
+        assert send_email.call_args.args[0] == user.email
+        print_mock.assert_not_called()
+
+    async def test_refresh_reads_cookie_and_resets_it(self, client):
+        with patch(
+            "app.api.v1.endpoints.auth.rotate_refresh_token",
+            new=AsyncMock(return_value=("new-access-token", "new-refresh-token")),
+        ) as rotate_refresh_token:
+            resp = await client.post(
+                "/api/v1/auth/refresh",
+                headers={"cookie": "refresh_token=old-refresh-token"},
+            )
+
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "access_token": "new-access-token",
+            "token_type": "bearer",
+        }
+        assert "refresh_token=new-refresh-token" in resp.headers["set-cookie"]
+        assert rotate_refresh_token.await_args.args[1] == "old-refresh-token"
+
+    async def test_logout_revokes_refresh_token_cookie_without_access_token(
+        self, client
+    ):
+        with patch(
+            "app.api.v1.endpoints.auth.logout_user",
+            new=AsyncMock(),
+        ) as logout_user:
+            resp = await client.post(
+                "/api/v1/auth/logout",
+                headers={"cookie": "refresh_token=raw-refresh-token"},
+            )
+
+        assert resp.status_code == 200
+        assert "refresh_token=" in resp.headers["set-cookie"]
+        assert "Max-Age=0" in resp.headers["set-cookie"]
+        assert logout_user.await_args.args[1] == "raw-refresh-token"
+
+    async def test_refresh_requires_refresh_cookie(self, client):
+        resp = await client.post("/api/v1/auth/refresh")
+
+        assert resp.status_code == 401
+
+    def test_token_response_refresh_token_is_optional(self):
+        response = TokenResponse(access_token="access")
+
+        assert response.refresh_token is None
+
+    async def test_login_unknown_user_returns_401(self):
+        with (
+            patch(
+                "app.services.auth.get_user_by_email",
+                new=AsyncMock(return_value=None),
+            ),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await auth_service.login_user(
+                MagicMock(),
+                "missing@example.com",
+                "wrong-password",
+                request=_make_request(),
+            )
+
+        assert exc_info.value.status_code == 401
+
+    async def test_create_refresh_token_uses_uuid_and_request_metadata(self):
+        db = MagicMock()
+        user = _make_user(email="refresh@example.com")
+
+        raw, record = await auth_service._create_refresh_token(
+            db,
+            user,
+            user_agent="pytest",
+            ip_address="203.0.113.10",
+        )
+
+        assert raw
+        assert record.token_hash == hash_refresh_token(raw)
+        assert record.token_hash != raw
+        assert record.user_id == user.id
+        assert record.user_agent == "pytest"
+        assert record.ip_address == "203.0.113.10"
+        db.add.assert_called_once_with(record)
+
+    def test_refresh_token_context_uses_forwarded_for_from_trusted_proxy(self):
+        with patch.object(settings, "TRUSTED_PROXIES", "127.0.0.1"):
+            user_agent, ip_address = auth_service._refresh_token_context(
+                _make_request(
+                    headers={
+                        "x-forwarded-for": "203.0.113.10, 198.51.100.10",
+                        "user-agent": "pytest",
+                    },
+                    host="127.0.0.1",
+                )
+            )
+
+        assert user_agent == "pytest"
+        assert ip_address == "203.0.113.10"
+
+    def test_refresh_token_context_ignores_untrusted_forwarded_for(self):
+        with patch.object(settings, "TRUSTED_PROXIES", ""):
+            _, ip_address = auth_service._refresh_token_context(
+                _make_request(
+                    headers={"x-forwarded-for": "203.0.113.10"},
+                    host="127.0.0.1",
+                )
+            )
+
+        assert ip_address == "127.0.0.1"
+
+    def test_refresh_token_context_caps_user_agent_and_rejects_invalid_ip(self):
+        user_agent, ip_address = auth_service._refresh_token_context(
+            _make_request(
+                headers={"user-agent": "x" * 600},
+                host="not-an-ip-address",
+            )
+        )
+
+        assert user_agent == "x" * 512
+        assert ip_address is None
+
+    def test_verification_email_log_omits_email_and_token(self):
+        with patch.object(email_service.logger, "info") as logger_info:
+            email_service.send_verification_email("secret@example.com", "token-value")
+
+        logger_info.assert_called_once_with("Verification email queued")
+        logged = str(logger_info.call_args)
+        assert "secret@example.com" not in logged
+        assert "token-value" not in logged
 
 
 # ---------------------------------------------------------------------------
