@@ -1,8 +1,11 @@
 from fastapi import APIRouter, Cookie, HTTPException, Query, Request, Response, status
 
 from app.api.deps import CurrentUser, DBSession
-from app.core.config import settings
-from app.core.security import create_verification_token, decode_token
+from app.core.security import (
+    create_oauth_state_token,
+    create_verification_token,
+    decode_token,
+)
 from app.schemas.auth import (
     LoginRequest,
     MessageResponse,
@@ -11,45 +14,25 @@ from app.schemas.auth import (
     UserResponse,
 )
 from app.services.auth import (
+    OAUTH_STATE_COOKIE,
+    REFRESH_TOKEN_COOKIE,
+    build_google_auth_url,
+    clear_oauth_state_cookie,
+    clear_refresh_token_cookie,
+    exchange_google_code,
+    fetch_google_userinfo,
     get_user_by_email,
+    login_or_register_google_user,
     login_user,
     logout_user,
     register_user,
     rotate_refresh_token,
+    set_oauth_state_cookie,
+    set_refresh_token_cookie,
 )
 from app.services.email import send_verification_email
 
 router = APIRouter()
-_REFRESH_TOKEN_COOKIE = "refresh_token"
-_REFRESH_TOKEN_COOKIE_PATH = f"{settings.API_V1_PREFIX}/auth"
-_REFRESH_TOKEN_COOKIE_MAX_AGE = settings.REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60
-
-
-def _set_refresh_token_cookie(response: Response, refresh_token: str) -> None:
-    response.set_cookie(
-        key=_REFRESH_TOKEN_COOKIE,
-        value=refresh_token,
-        max_age=_REFRESH_TOKEN_COOKIE_MAX_AGE,
-        path=_REFRESH_TOKEN_COOKIE_PATH,
-        secure=True,
-        httponly=True,
-        samesite="strict",
-    )
-
-
-def _clear_refresh_token_cookie(response: Response) -> None:
-    response.delete_cookie(
-        key=_REFRESH_TOKEN_COOKIE,
-        path=_REFRESH_TOKEN_COOKIE_PATH,
-        secure=True,
-        httponly=True,
-        samesite="strict",
-    )
-
-
-# ---------------------------------------------------------------------------
-# POST /register
-# ---------------------------------------------------------------------------
 
 
 @router.post(
@@ -74,11 +57,6 @@ async def register(body: RegisterRequest, db: DBSession) -> MessageResponse:
     )
 
 
-# ---------------------------------------------------------------------------
-# POST /login
-# ---------------------------------------------------------------------------
-
-
 @router.post(
     "/login",
     response_model=TokenResponse,
@@ -97,13 +75,8 @@ async def login(
         password=body.password,
         request=request,
     )
-    _set_refresh_token_cookie(response, raw_refresh)
+    set_refresh_token_cookie(response, raw_refresh)
     return TokenResponse(access_token=access_token)
-
-
-# ---------------------------------------------------------------------------
-# POST /refresh
-# ---------------------------------------------------------------------------
 
 
 @router.post(
@@ -116,7 +89,7 @@ async def refresh(
     request: Request,
     response: Response,
     db: DBSession,
-    refresh_token: str | None = Cookie(default=None, alias=_REFRESH_TOKEN_COOKIE),
+    refresh_token: str | None = Cookie(default=None, alias=REFRESH_TOKEN_COOKIE),
 ) -> TokenResponse:
     if refresh_token is None:
         raise HTTPException(
@@ -126,13 +99,8 @@ async def refresh(
     access_token, new_raw_refresh = await rotate_refresh_token(
         db, refresh_token, request
     )
-    _set_refresh_token_cookie(response, new_raw_refresh)
+    set_refresh_token_cookie(response, new_raw_refresh)
     return TokenResponse(access_token=access_token)
-
-
-# ---------------------------------------------------------------------------
-# POST /logout
-# ---------------------------------------------------------------------------
 
 
 @router.post(
@@ -143,22 +111,17 @@ async def refresh(
 async def logout(
     response: Response,
     db: DBSession,
-    refresh_token: str | None = Cookie(default=None, alias=_REFRESH_TOKEN_COOKIE),
+    refresh_token: str | None = Cookie(default=None, alias=REFRESH_TOKEN_COOKIE),
 ) -> MessageResponse:
     if refresh_token is not None:
         await logout_user(db, refresh_token)
-    _clear_refresh_token_cookie(response)
+    clear_refresh_token_cookie(response)
     return MessageResponse(message="Logged out successfully")
 
 
 @router.get("/me", response_model=UserResponse)
 async def get_me(current_user: CurrentUser):
     return current_user
-
-
-# ---------------------------------------------------------------------------
-# Email verification
-# ---------------------------------------------------------------------------
 
 
 @router.get(
@@ -194,3 +157,84 @@ async def verify_email(
     user.email_verified = True
     await db.commit()
     return MessageResponse(message="Email verified successfully")
+
+
+@router.get(
+    "/google",
+    summary="Start Google OAuth flow",
+)
+async def google_start(response: Response) -> Response:
+    state = create_oauth_state_token()
+    set_oauth_state_cookie(response, state)
+    response.status_code = status.HTTP_307_TEMPORARY_REDIRECT
+    response.headers["Location"] = build_google_auth_url(state)
+    return response
+
+
+@router.get(
+    "/google/callback",
+    response_model=TokenResponse,
+    response_model_exclude_none=True,
+    summary="Handle Google OAuth callback",
+)
+async def google_callback(
+    request: Request,
+    response: Response,
+    db: DBSession,
+    code: str | None = Query(default=None),
+    state: str | None = Query(default=None),
+    error: str | None = Query(default=None),
+    error_description: str | None = Query(default=None),
+    state_cookie: str | None = Cookie(default=None, alias=OAUTH_STATE_COOKIE),
+) -> TokenResponse:
+    try:
+        if error:
+            message = "Google OAuth was cancelled"
+            if error != "access_denied":
+                message = f"Google OAuth error: {error}"
+            if error_description:
+                message = f"{message}: {error_description}"
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=message,
+            )
+        if not code or not state or not state_cookie:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Missing OAuth parameters",
+            )
+        if state != state_cookie:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid OAuth state",
+            )
+        payload = decode_token(state)
+        if payload.get("purpose") != "oauth_state":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid OAuth state",
+            )
+
+        token_payload = await exchange_google_code(code)
+        google_access = token_payload.get("access_token")
+        if not google_access:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Google token response missing access_token",
+            )
+
+        profile = await fetch_google_userinfo(google_access)
+        access_token, raw_refresh, _ = await login_or_register_google_user(
+            db,
+            profile,
+            request,
+        )
+        set_refresh_token_cookie(response, raw_refresh)
+        clear_oauth_state_cookie(response)
+        return TokenResponse(access_token=access_token)
+    except HTTPException:
+        clear_oauth_state_cookie(response)
+        raise
+    except Exception:
+        clear_oauth_state_cookie(response)
+        raise
