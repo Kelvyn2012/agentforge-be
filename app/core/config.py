@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     API_V1_PREFIX: str = "/api/v1"
 
     DATABASE_URL: PostgresDsn
+    DB_USE_SSL: bool = False
 
     JWT_SECRET: str
     JWT_ALGORITHM: str = "HS256"
