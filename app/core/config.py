@@ -1,7 +1,10 @@
 from functools import lru_cache
+from urllib.parse import urlencode, urlparse, urlunparse, parse_qs
 
-from pydantic import PostgresDsn
+from pydantic import PostgresDsn, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_ASYNCPG_UNSUPPORTED_PARAMS = {"sslmode", "channel_binding"}
 
 
 class Settings(BaseSettings):
@@ -17,6 +20,18 @@ class Settings(BaseSettings):
 
     DATABASE_URL: PostgresDsn
     DB_USE_SSL: bool = False
+
+    @field_validator("DATABASE_URL", mode="before")
+    @classmethod
+    def strip_asyncpg_unsupported_params(cls, v: str) -> str:
+        parsed = urlparse(str(v))
+        params = {
+            k: vals
+            for k, vals in parse_qs(parsed.query).items()
+            if k not in _ASYNCPG_UNSUPPORTED_PARAMS
+        }
+        clean_query = urlencode(params, doseq=True)
+        return urlunparse(parsed._replace(query=clean_query))
 
     JWT_SECRET: str
     JWT_ALGORITHM: str = "HS256"
