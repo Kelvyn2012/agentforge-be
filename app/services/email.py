@@ -1,14 +1,17 @@
 import logging
 
+from app.core.config import settings
+
 logger = logging.getLogger(__name__)
 
 
-def send_verification_email(_to_email: str, _token: str) -> None:
+def send_verification_email(_to_email: str, token: str) -> None:
     """
     Stub: in production, dispatch a real email via your provider.
-    Keep token delivery behind this boundary so endpoints never log secrets.
     """
     logger.info("Verification email queued")
+    verification_url = f"{settings.FRONTEND_URL}/verify-email?token={token}"
+    print(f"[DEV] Verify email link: {verification_url}", flush=True)
 
 
 def send_password_reset_email(_to_email: str, reset_url: str) -> None:
